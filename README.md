@@ -35,34 +35,33 @@ bash scripts/deploy.sh --vault /path/to/markdown
 
 ```mermaid
 flowchart TB
-  Agent["MCP client"]
+  Client(["MCP client"])
 
-  subgraph stack ["Brain MCP"]
-    direction TB
-    MCP["brain-mcp<br/>stdio · ~140 MB"]
+  Client <-->|"stdio JSON-RPC"| Server
 
-    subgraph backends [" "]
-      direction LR
-      Vault[("markdown vault")]
-      Embed["embed service<br/>:8091"]
-      Qdrant[("Qdrant<br/>:6333")]
-    end
-  end
+  Server["brain-mcp · 12 tools\n~140 MB RSS"]
 
-  Agent <-->|"stdio"| MCP
-  MCP <-->|"read/write"| Vault
-  MCP -->|"HTTP"| Embed
-  MCP -->|"HTTP"| Qdrant
-  Embed -.->|"vectors"| Qdrant
+  Server -->|"POST /embed\n(text → vectors)"| Embed["brain-embed :8091\nMiniLM-L12 384d + BM25 sparse"]
+  Server -->|"dual prefetch → RRF fusion"| Qdrant[("Qdrant :6333\nhybrid collection\npayload index: path")]
+  Server <-->|"read · write · reindex"| Vault[("vault/\nmarkdown files")]
+  Server -->|"rg -ni (brain_grep)"| Vault
+
+  Reindex(["brain-reindex\nsystemd timer"]) -.->|"mtime → re-embed"| Qdrant
+  Dashboard(["brain-dashboard\n:8090"]) -.->|"read tasks + logs"| Vault
 ```
+
+**Search flow:** query → `brain-embed` encodes dense (384d cosine) + sparse (BM25 IDF) → Qdrant runs two prefetches (3x limit each) → RRF fusion → ranked chunks returned.
+
+**Write flow:** file written to vault → chunked on headings (max 1500 chars) → old chunks deleted from Qdrant → new chunks embedded and upserted.
 
 | Process | Role | Bind |
 |---------|------|------|
 | `brain-mcp` | MCP tools, vault I/O, Qdrant queries | stdio |
-| `brain-embed` | MiniLM dense + BM25 sparse, loaded once | `127.0.0.1:8091` |
-| Qdrant | Hybrid collection, payload index on `path` | `127.0.0.1:6333` |
-| `vault/` | Markdown source of truth | — |
-| `brain-dashboard` | Optional read-only UI | `127.0.0.1:8090` |
+| `brain-embed` | Dense + sparse ONNX models, loaded once | `127.0.0.1:8091` |
+| Qdrant | Hybrid vector collection | `127.0.0.1:6333` |
+| `vault/` | Markdown source of truth | filesystem |
+| `brain-reindex` | Incremental mtime-based reindex | systemd timer |
+| `brain-dashboard` | Read-only Kanban + session logs | `127.0.0.1:8090` |
 
 Details: [docs/architecture.md](docs/architecture.md)
 

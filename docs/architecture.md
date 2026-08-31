@@ -2,69 +2,110 @@
 
 Brain MCP is an MCP stdio server over a markdown vault. Retrieval is hybrid (dense MiniLM + BM25 sparse, RRF). Mutations reindex the affected file.
 
-## Processes
+## System overview
 
 ```mermaid
 flowchart TB
-  Agent["MCP client"]
+  Client(["MCP client"])
 
-  subgraph stack ["Brain MCP"]
-    direction TB
-    MCP["brain-mcp<br/>stdio · ~140 MB"]
+  Client <-->|"stdio JSON-RPC"| Server
 
-    subgraph backends [" "]
-      direction LR
-      Vault[("markdown vault")]
-      Embed["embed service<br/>:8091"]
-      Qdrant[("Qdrant<br/>:6333")]
-    end
-  end
+  Server["brain-mcp · 12 tools\n~140 MB RSS"]
 
-  Agent <-->|"stdio"| MCP
-  MCP <-->|"read/write"| Vault
-  MCP -->|"HTTP"| Embed
-  MCP -->|"HTTP"| Qdrant
-  Embed -.->|"vectors"| Qdrant
+  Server -->|"POST /embed\n(text → vectors)"| Embed["brain-embed :8091\nMiniLM-L12 384d + BM25 sparse"]
+  Server -->|"dual prefetch → RRF fusion"| Qdrant[("Qdrant :6333\nhybrid collection\npayload index: path")]
+  Server <-->|"read · write · reindex"| Vault[("vault/\nmarkdown files")]
+  Server -->|"rg -ni (brain_grep)"| Vault
+
+  Reindex(["brain-reindex\nsystemd timer"]) -.->|"mtime → re-embed"| Qdrant
+  Dashboard(["brain-dashboard\n:8090"]) -.->|"read tasks + logs"| Vault
 ```
 
-## Thin client
+## Search pipeline
 
-Each MCP connection is a process. Loading FastEmbed in every session is ~600 MB RSS.
+`brain_search` is the primary retrieval tool. It runs two parallel vector searches and merges results.
 
-`brain-embed` loads dense and sparse models once and serves `POST /embed`. The MCP process stays ~140 MB.
+```mermaid
+flowchart LR
+  Q["query text"] --> Enc["brain-embed\nPOST /embed"]
 
-| Model | Kind | Dim / type |
+  Enc --> DV["dense vector\n384d float32"]
+  Enc --> SV["sparse vector\nBM25 IDF weights"]
+
+  DV --> DP["Qdrant:\ndense prefetch\n(3 × limit, cosine)"]
+  SV --> SP["Qdrant:\nsparse prefetch\n(3 × limit, IDF)"]
+
+  DP --> RRF{{"RRF fusion"}}
+  SP --> RRF
+
+  RRF --> R["top-k chunks\nwith scores + payload"]
+```
+
+1. Query text is sent to `brain-embed` which returns both dense (MiniLM-L12, 384 dimensions, cosine) and sparse (BM25 with IDF modifier) vectors.
+2. Qdrant runs two prefetches: dense retrieves by semantic similarity, sparse by keyword overlap. Each returns `3 × limit` candidates.
+3. Reciprocal Rank Fusion merges both ranked lists into a single result set.
+4. Optional `path_prefix` applies a `MatchText` filter on the `path` payload field before fusion.
+
+`brain_grep` bypasses vectors entirely — it runs `rg -n --max-count 3 -i` directly on vault files.
+
+## Write pipeline
+
+Any mutation tool (`brain_write`, `brain_append`, `brain_log`, `brain_lesson`) follows the same pattern:
+
+```mermaid
+flowchart LR
+  W["write / append"] --> F["vault file\n(filesystem)"]
+  F --> C["chunk\n(split on headings\nmax 1500 chars)"]
+  C --> E["brain-embed\n(dense + sparse)"]
+  E --> U["Qdrant:\ndelete old path →\nupsert new chunks"]
+```
+
+1. File is written to the vault.
+2. Content is split into chunks at markdown heading boundaries. Paragraphs break up blocks exceeding 1500 characters.
+3. Old Qdrant points matching the file's relative `path` are deleted.
+4. New chunks are embedded (dense + sparse) and upserted with payload: `{path, chunk, title, mtime, text}`.
+
+## Thin client design
+
+Each MCP session spawns a `brain-mcp` process. Loading ONNX embedding models in every process would cost ~600 MB RSS.
+
+`brain-embed` is a standalone HTTP service that loads both models once and serves `POST /embed`. This keeps each MCP process at ~140 MB.
+
+| Model | Kind | Dimensions |
 |-------|------|------------|
 | `sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2` | dense | 384, cosine |
-| `Qdrant/bm25` | sparse | IDF modifier |
-
-## Search
-
-`brain_search` issues two Qdrant prefetches (dense, sparse), then `Fusion.RRF`. Optional `path_prefix` uses `MatchText` on payload `path`.
-
-`brain_grep` is `rg -n --max-count 3 -i` over the vault.
+| `Qdrant/bm25` | sparse | variable, IDF modifier |
 
 ## Indexing
 
-- `brain-index` — `recreate_collection`, KEYWORD index on `path`, batch upsert
-- `brain-reindex` — files with mtime newer than marker
-- write tools — delete by `path` then upsert chunks
+| Command | Behavior |
+|---------|----------|
+| `brain-index` | Drop + recreate collection, KEYWORD index on `path`, batch embed + upsert all `.md` files |
+| `brain-reindex` | Compare file mtime against marker, re-embed only changed files |
+| write tools | Per-file: delete old points by `path`, chunk, embed, upsert |
 
-Chunking: split on markdown headings, max 1500 characters, then paragraphs.
+## Qdrant collection
 
-## Tools (12)
-
-Same set as README. Dashboard is not an MCP tool.
+- **Dense named vector** `"dense"`: 384d, cosine distance
+- **Sparse named vector** `"sparse"`: variable-length, IDF modifier
+- **Payload index**: KEYWORD on `path` field (speeds up deletes and `path_prefix` filtering)
+- Point ID: deterministic `uuid5(namespace, "{path}:{chunk_index}")`
 
 ## Dashboard
 
-`brain-dashboard` binds `BRAIN_DASHBOARD_HOST:BRAIN_DASHBOARD_PORT` (default `127.0.0.1:8090`). Reads `tasks/{backlog,active,blocked,done}` and JSONL under `BRAIN_AGENT_LOGS`.
+`brain-dashboard` is an optional stdlib HTTP server that reads:
+- `tasks/{backlog,active,blocked,done}/*.md` for the Kanban view
+- `BRAIN_AGENT_LOGS/{date}/*.jsonl` for changes, errors, and session views
 
-## Deploy
+No writes. No authentication (bind to `127.0.0.1` by default).
 
-Local: MCP + vault on the workstation; Qdrant and embed via Compose.
+## Deployment modes
 
-Remote: MCP over SSH stdio (`scripts/mcp-launcher.sh`).
+**Local:** MCP process + vault on the workstation. Qdrant and embed via Docker Compose.
+
+**Remote:** MCP over SSH stdio. `scripts/mcp-launcher.sh` uses `ControlMaster` / `ControlPersist` for connection reuse.
+
+**Server:** `deploy.sh --server` installs to `/opt/brain-mcp`, creates systemd units for reindex timer and dashboard.
 
 ## Environment
 
