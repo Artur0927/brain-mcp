@@ -1,0 +1,13 @@
+{
+  "mcpServers": {
+    "brain-search": {
+      "type": "stdio",
+      "command": "/path/to/brain-mcp/.venv/bin/brain-mcp",
+      "env": {
+        "BRAIN_VAULT": "/path/to/brain-mcp/vault",
+        "BRAIN_QDRANT_HOST": "127.0.0.1",
+        "BRAIN_EMBED_URL": "http://127.0.0.1:8091/embed"
+      }
+    }
+  }
+}

@@ -1,0 +1,15 @@
+[Unit]
+Description=Brain shared embedding service
+After=network.target
+
+[Service]
+Type=simple
+Environment=BRAIN_EMBED_PORT=8091
+ExecStart=/opt/brain-mcp/.venv/bin/brain-embed
+Restart=on-failure
+RestartSec=3
+MemoryHigh=750M
+MemoryMax=1100M
+
+[Install]
+WantedBy=multi-user.target

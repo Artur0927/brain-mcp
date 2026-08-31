@@ -1,0 +1,33 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+dist/
+build/
+
+# Vault & runtime (user data)
+vault/
+agentlogs/
+.brain/
+.last_reindex
+
+# Models cache (fastembed / huggingface)
+.cache/
+models/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+
+# OS
+.DS_Store
+
+# Secrets — never commit
+.env
+*.pem
+*.key
+credentials/
+examples/mcp/mcp.generated.json

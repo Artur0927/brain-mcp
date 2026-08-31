@@ -1,0 +1,10 @@
+[Unit]
+Description=Brain incremental reindex
+After=network.target qdrant.service brain-embed.service
+
+[Service]
+Type=oneshot
+Environment=BRAIN_VAULT=/data/vault
+Environment=BRAIN_REINDEX_MARKER_PATH=/data/.brain/.last_reindex
+ExecStart=/opt/brain-mcp/.venv/bin/brain-reindex
+ExecStartPost=/opt/brain-mcp/.venv/bin/brain-lessons-index
