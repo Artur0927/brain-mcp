@@ -5,20 +5,19 @@ Brain MCP is an MCP stdio server over a markdown vault. Retrieval is hybrid (den
 ## System overview
 
 ```mermaid
-flowchart TB
-  Client(["MCP client"])
+flowchart LR
+  Client(["MCP\nclient"]) <-->|stdio| Server
 
-  Client <-->|"stdio JSON-RPC"| Server
+  subgraph core [" "]
+    direction TB
+    Server["brain-mcp\n12 tools · ~140 MB"]
+    Server -->|encode| Embed["brain-embed :8091\nMiniLM-L12 + BM25"]
+    Server -->|prefetch + RRF| Qdrant[("Qdrant :6333")]
+    Server <-->|fs| Vault[("vault/")]
+  end
 
-  Server["brain-mcp · 12 tools\n~140 MB RSS"]
-
-  Server -->|"POST /embed\n(text → vectors)"| Embed["brain-embed :8091\nMiniLM-L12 384d + BM25 sparse"]
-  Server -->|"dual prefetch → RRF fusion"| Qdrant[("Qdrant :6333\nhybrid collection\npayload index: path")]
-  Server <-->|"read · write · reindex"| Vault[("vault/\nmarkdown files")]
-  Server -->|"rg -ni (brain_grep)"| Vault
-
-  Reindex(["brain-reindex\nsystemd timer"]) -.->|"mtime → re-embed"| Qdrant
-  Dashboard(["brain-dashboard\n:8090"]) -.->|"read tasks + logs"| Vault
+  Reindex(["brain-reindex"]) -.->|timer| Qdrant
+  Dashboard(["dashboard :8090"]) -.->|read| Vault
 ```
 
 ## Search pipeline
